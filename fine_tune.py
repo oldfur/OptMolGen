@@ -187,7 +187,7 @@ def main():
                 'virtual_token': virtual_token.data,
                 'token_proj': generative_model.dynamics.egnn.token_proj.state_dict()
             }, save_path)
-            print(f"Saved 2-MBA adapter to {save_path}")
+            print(f"Saved {finetune_args.model_path} adapter to {save_path}")
 
 if __name__ == "__main__":
     main()
