@@ -2,6 +2,19 @@ from torch import nn
 import torch
 import math
 
+
+class TokenConditioning(nn.Module):
+    def __init__(self, token_dim, hidden_dim):
+        super().__init__()
+        self.gamma = nn.Linear(token_dim, hidden_dim)
+        self.beta  = nn.Linear(token_dim, hidden_dim)
+
+    def forward(self, h, token):
+        gamma = self.gamma(token)
+        beta  = self.beta(token)
+        return gamma * h + beta
+
+
 class GCL(nn.Module):
     def __init__(self, input_nf, output_nf, hidden_nf, normalization_factor, aggregation_method,
                  edges_in_d=0, nodes_att_dim=0, act_fn=nn.SiLU(), attention=False):
@@ -183,9 +196,11 @@ class EGNN(nn.Module):
                                                                normalization_factor=self.normalization_factor,
                                                                aggregation_method=self.aggregation_method))
         
+        # token embedding learning layer
         if self.virtual_token_dim is not None:
             self.token_proj = nn.Linear(self.virtual_token_dim, self.hidden_nf)
-
+        self.film = TokenConditioning(self.virtual_token_dim, self.hidden_nf) if self.virtual_token_dim is not None else None
+        
         self.to(self.device)
 
     def forward(self, h, x, edge_index, node_mask=None, edge_mask=None, virtual_token=None):
@@ -198,8 +213,9 @@ class EGNN(nn.Module):
         # token_proj
         if hasattr(self, 'token_proj') and virtual_token is not None:
             token_effect = self.token_proj(virtual_token)
-            # 通过残差相加的方式融合，不改变特征维度，最大化保留预训练知识
-            h = h + token_effect
+            # 通过残差融合，不改变特征维度，最大化保留预训练知识
+            # h = h + token_effect
+            h = self.film(h, virtual_token)  # 使用 FiLM 层进行调制，增强表达能力
         if node_mask is not None:
             h = h * node_mask  # 防止特征污染
 

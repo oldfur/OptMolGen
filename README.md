@@ -12,3 +12,7 @@ To visualize some molecules:
 
 --model_path: outputs/drugs_latent2.tar.gz
 --n_samples: 100
+
+## pretrained model
+
+[download model](https://drive.google.com/drive/folders/1EQ9koVx-GA98kaKBS8MZ_jJ8g4YhdKsL)

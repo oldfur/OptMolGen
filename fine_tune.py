@@ -31,12 +31,13 @@ from train_test import train_epoch_virtual_token
 import wandb
 
 def main():
+    # args
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default="outputs/drugs_latent2",
                         help='Specify model path')
     parser.add_argument('--dataset_path', type=str, default="dataset/BPN_structures",
                         help='Path to the dataset for fine-tuning')
-    parser.add_argument('--virtual_token_dim', type=int, default=16,
+    parser.add_argument('--virtual_token_dim', type=int, default=256,
                         help='Dimension of the virtual token to be injected into EGNN')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for fine-tuning')
     parser.add_argument('--ema_decay', type=float, default=0.999,           # TODO
@@ -72,6 +73,13 @@ def main():
 
     dataset_info = get_dataset_info(args.dataset, args.remove_h)
 
+    # Create dataloader for fine-tuning
+    finetune_dataset = FineTuneDataset(folder_path=finetune_args.dataset_path, n_dims=3)
+    finetune_dataloader = DataLoader(
+        finetune_dataset, batch_size=args.batch_size // 8, shuffle=True,
+        collate_fn=collate_for_geoldm, num_workers=0
+    )
+
     # Load model
     if len(args.conditioning) == 0:
         generative_model, nodes_dist, prop_dist = get_latent_diffusion(args, device, dataset_info, finetune_args=finetune_args)
@@ -94,40 +102,31 @@ def main():
     missing_keys = [k for k in model_dict.keys() if k not in flow_state_dict]
     print(f"以下层是新定义的，将保持随机初始化: {missing_keys}")
 
-    # Extract the VAE parameters and frozen it. 
-    vae = generative_model.vae
-    vae.eval() # 设置为推断模式，关闭 Dropout 和 BatchNorm 的更新
-    for param in vae.parameters():
+    # Extract parameters and frozen
+    generative_model.eval()
+    for param in generative_model.parameters():
         param.requires_grad = False
-    print("VAE components frozen successfully.")
-
-    # Create dataloader for fine-tuning
-    finetune_dataset = FineTuneDataset(folder_path=finetune_args.dataset_path, n_dims=3)
-    finetune_dataloader = DataLoader(
-        finetune_dataset, batch_size=args.batch_size // 8, shuffle=True,
-        collate_fn=collate_for_geoldm, num_workers=0
-    )
 
     # 初始化 virtual_token for EGNN 
     virtual_dim = finetune_args.virtual_token_dim
     virtual_token = torch.nn.Parameter(torch.randn(1, virtual_dim).to(device) * 0.02)
 
-    # 冻结整个生成模型的所有参数 (VAE + Dynamics)
-    generative_model.eval()
-    for param in generative_model.parameters():
-        param.requires_grad = False
-
-    # 局部解冻：针对 EGNN 内部新增的 token_proj 层
-    # 确保在 egnn_new.py 中定义的 projection 层可以被训练
+    # 局部解冻：针对 EGNN 内部新增的层
     if hasattr(generative_model.dynamics.egnn, 'token_proj'):
         for param in generative_model.dynamics.egnn.token_proj.parameters():
             param.requires_grad = True
+    if hasattr(generative_model.dynamics.egnn, 'film'):
+        for param in generative_model.dynamics.egnn.film.parameters():
+            param.requires_grad = True
 
     # 筛选出所有需要更新的参数
-    # params 列表将只包含 virtual_token 和 token_proj 的权重
     trainable_params = [
-        {'params': [virtual_token], 'lr': finetune_args.lr},  # Token 本身通常需要稍大的学习率
-        {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1} # 投影层建议较小，保持稳定
+        {'params': [virtual_token], 'lr': finetune_args.lr},  
+        # Token 本身通常需要稍大的学习率
+        {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1}, 
+        # 投影层建议较小，保持稳定
+        {'params': generative_model.dynamics.egnn.film.parameters(), 'lr': finetune_args.lr * 0.1} 
+        # film 层也建议较小学习率
     ]
 
     # AdamW optimizer
@@ -158,6 +157,8 @@ def main():
         name="virtual_token_experiment" # 本次实验的名称
     )
 
+    # breakpoint()
+
     # fine-tuning loop
     for epoch in range(args.n_epochs):
     # 调用你定义的训练函数
@@ -185,7 +186,8 @@ def main():
             save_path = join(finetune_args.model_path, f'virtual_token_epoch_{epoch}.pt')
             torch.save({
                 'virtual_token': virtual_token.data,
-                'token_proj': generative_model.dynamics.egnn.token_proj.state_dict()
+                'token_proj': generative_model.dynamics.egnn.token_proj.state_dict(),
+                'film': generative_model.dynamics.egnn.film.state_dict()
             }, save_path)
             print(f"Saved {finetune_args.model_path} adapter to {save_path}")
 
