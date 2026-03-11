@@ -35,7 +35,7 @@ from qm9 import visualizer as qm9_visualizer
 from eval_has_motif import batch_check_contains_motif
 from build_geom_dataset import GeomDrugsDataset, GeomDrugsDataLoader, GeomDrugsTransform
 from build_class_prior_dataset import build_data_list_from_pkl
-from visualize_utils import save_rdkit_png, save_collapsed_plot, save_molecule_images
+from visualize_utils import save_rdkit_svg, save_collapsed_plot, save_molecule_images
 from models.egnn.lora import inject_lora_to_last_layers
 
 
@@ -108,7 +108,7 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
         if mol_obj is not None:
             # case A: transform succeeded but didn't match the motif 
             # 可能是结构太乱或官能团学歪了
-            save_rdkit_png(mol_obj, join(viz_dir, f"{file_id}_mismatch.png"), label="No Motif Match")
+            save_rdkit_svg(mol_obj, join(viz_dir, f"{file_id}_mismatch.svg"), label="No Motif Match")
         else:
             # case B: RDKit failed to determine bond orders 
             # 通常是原子距离太近导致 NaN 或价键爆炸
@@ -118,7 +118,7 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
                 molecules['one_hot'][batch_idx], 
                 molecules['node_mask'][batch_idx], 
                 atom_mapping, 
-                join(viz_dir, f"{file_id}_collapsed.png")
+                join(viz_dir, f"{file_id}_collapsed.svg")
             )
 
     return stability_dict, rdkit_metrics, contains_dict

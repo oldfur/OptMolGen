@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def save_rdkit_png(mol, path, label=""):
+def save_rdkit_svg(mol, path, label=""):
     """保存 RDKit 能识别出的分子图"""
     try:
         Draw.MolToFile(mol, path, size=(400, 400), legend=label)
@@ -42,16 +42,9 @@ def save_molecule_images(mol_list, output_dir, prefix="hit"):
     for i, mol in enumerate(mol_list):
         if mol is None: continue
         
-        # 使用 MolToFile
-        # 这种方式对环境依赖最少，通常能直接运行
-        file_path = os.path.join(output_dir, f"{prefix}_{i}.png")
-        try:
-            Draw.MolToFile(mol, file_path, size=(400, 400))
-        except Exception as e:
-            # 如果 PNG 还是不行，尝试保存为 SVG
-            svg_path = os.path.join(output_dir, f"{prefix}_{i}.svg")
-            Draw.MolToFile(mol, svg_path, size=(400, 400))
-            print(f"Saved as SVG due to PNG error: {e}")
+        # 使用 MolToFile 保存为 SVG
+        svg_path = os.path.join(output_dir, f"{prefix}_{i}.svg")
+        Draw.MolToFile(mol, svg_path, size=(400, 400))
 
 
 def visualize_failures(contains_dict, x, one_hot, node_mask, atom_mapping, out_path):
@@ -68,13 +61,13 @@ def visualize_failures(contains_dict, x, one_hot, node_mask, atom_mapping, out_p
         if mol_obj is not None:
             # 情况 A: 分子图生成了，但没匹配上（通常是结构太乱）
             img = Draw.MolToImage(mol_obj, size=(400, 400), legend=f"Failed Match Index {idx}")
-            img.save(os.path.join(out_path, f"failed_match_{idx}.png"))
+            img.save(os.path.join(out_path, f"failed_match_{idx}.svg"))
         else:
             # 情况 B: rdDetermineBonds 崩溃，可视化原始 3D 坐标
             visualize_atomic_cloud(
                 x[idx], one_hot[idx], node_mask[idx], 
                 index_to_atomic_num, 
-                save_path=os.path.join(out_path, f"collapsed_atoms_{idx}.png")
+                save_path=os.path.join(out_path, f"collapsed_atoms_{idx}.svg")
             )
 
 def visualize_atomic_cloud(x, one_hot, node_mask, idx_to_num, save_path):
