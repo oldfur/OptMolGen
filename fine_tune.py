@@ -36,6 +36,7 @@ from eval_has_motif import batch_check_contains_motif
 from build_geom_dataset import GeomDrugsDataset, GeomDrugsDataLoader, GeomDrugsTransform
 from build_class_prior_dataset import build_data_list_from_pkl
 from visualize_utils import save_rdkit_png, save_collapsed_plot, save_molecule_images
+from models.egnn.lora import inject_lora_to_last_layers
 
 
 def analyze_and_save_finetune(args, eval_args, device, generative_model,
@@ -140,13 +141,15 @@ def main():
                         help='Amount of EMA decay, 0 means off. A reasonable value is 0.999.')
     parser.add_argument('--finetune_batch_size', type=int, default=4, help='Batch size for fine-tuning')
     parser.add_argument('--sample_batch_size', type=int, default=4, help='Batch size for sampling during evaluation')
-    parser.add_argument('--n_samples', type=int, default=12, help='Number of samples to generate for evaluation')
+    parser.add_argument('--n_samples', type=int, default=8, help='Number of samples to generate for evaluation')
     parser.add_argument('--save_samples', type=bool, default=False, 
                         help='Whether to save sampled molecules as XYZ files for visualization')
-    parser.add_argument('--save_epoch', type=int, default=20, help='Save checkpoint every N epochs')
-    parser.add_argument('--report_epoch', type=int, default=5, help='Report evaluation results every N epochs')
-    parser.add_argument('--n_epochs', type=int, default=200, help='Number of fine-tuning epochs')
-
+    parser.add_argument('--save_epoch', type=int, default=10, help='Save checkpoint every N epochs')
+    parser.add_argument('--report_epoch', type=int, default=2, help='Report evaluation results every N epochs')
+    parser.add_argument('--n_epochs', type=int, default=400, help='Number of fine-tuning epochs')
+    parser.add_argument('--wandb-mode', type=str, default='online',
+                       choices=['online', 'offline', 'disabled', 'dryrun'],
+                       help='Wandb mode: online/offline/disabled/dryrun')
     finetune_args, unparsed_args = parser.parse_known_args()
 
     assert finetune_args.model_path is not None
@@ -216,6 +219,8 @@ def main():
     else:
         generative_model, nodes_dist, prop_dist = get_latent_diffusion(args, device, dataset_info, 
                                                                        dataloaders['train'], finetune_args=finetune_args)
+    # LoRA
+    generative_model.dynamics.egnn = inject_lora_to_last_layers(generative_model.dynamics.egnn)
     if prop_dist is not None:
         property_norms = compute_mean_mad(dataloaders, args.conditioning, args.dataset)
         prop_dist.set_normalizer(property_norms)
@@ -227,8 +232,8 @@ def main():
     model_dict = generative_model.state_dict()
     pretrained_dict = {k: v for k, v in flow_state_dict.items() if k in model_dict} # 过滤权重中不存在的键
     model_dict.update(pretrained_dict) # 更新现有的 model_dict
-    generative_model.load_state_dict(model_dict) # 加载
-    # 打印没加载上的层，确保只有新加的层
+    generative_model.load_state_dict(model_dict) # load model state dict
+    # 打印没加载上的层(新加的层)
     missing_keys = [k for k in model_dict.keys() if k not in flow_state_dict]
     print(f"以下层是新定义的，将保持随机初始化: {missing_keys}")
 
@@ -240,27 +245,33 @@ def main():
     # 初始化 virtual_token for EGNN 
     virtual_dim = finetune_args.virtual_token_dim
     virtual_token = torch.nn.Parameter(torch.randn(1, virtual_dim).to(device) * 0.02)
-
-    # 局部解冻：针对 EGNN 内部新增的层
-    if hasattr(generative_model.dynamics.egnn, 'token_proj'):
-        for param in generative_model.dynamics.egnn.token_proj.parameters():
+    virtual_token.requires_grad = True # 确保 virtual_token 也被优化器更新
+    
+    # 局部解冻
+    for name, param in generative_model.named_parameters():
+        if 'lora_' in name or 'token_proj' in name or 'film' in name:
             param.requires_grad = True
-    if hasattr(generative_model.dynamics.egnn, 'film'):
-        for param in generative_model.dynamics.egnn.film.parameters():
-            param.requires_grad = True
+    
+    # 提取 LoRA 参数
+    lora_params = [p for n, p in generative_model.named_parameters() if 'lora_' in n]
 
-    # 筛选出所有需要更新的参数
+    # 构建分层学习率表
     trainable_params = [
+        # Token 本身：需要最大的步长来在隐空间寻找 BPN 的位置
         {'params': [virtual_token], 'lr': finetune_args.lr},  
-        # Token 本身通常需要稍大的学习率
-        {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1}, 
-        # 投影层建议较小，保持稳定
-        {'params': generative_model.dynamics.egnn.film.parameters(), 'lr': finetune_args.lr * 0.1} 
-        # film 层也建议较小学习率
+        
+        # 投影层与 FiLM 层：负责翻译 Token 信号，建议保持在 1e-4
+        {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1},
+        {'params': generative_model.dynamics.egnn.film.parameters(), 'lr': finetune_args.lr * 0.1},
+        
+        # LoRA 参数：直接微调 EGNN 的 node/coord 逻辑
+        # 建议初始值设为 1e-4 (finetune_args.lr * 0.1)
+        # 如果苯环依然变形，可以尝试进一步降低到 5e-5
+        {'params': lora_params, 'lr': finetune_args.lr * 0.1}
     ]
 
     # AdamW optimizer
-    optimizer = torch.optim.AdamW(trainable_params, weight_decay=1e-2)
+    optimizer = torch.optim.AdamW(trainable_params, weight_decay=1e-5)
 
     # 辅助参量设置
     # 初始化 gradnorm_queue 用于梯度裁剪监控
@@ -282,9 +293,10 @@ def main():
 
     # wandb
     wandb.init(
+        mode=args.wandb_mode,
         project="OptMolGen-Finetune",  # 你的项目名称
         config=finetune_args,          # 记录你的超参数
-        name="virtual_token_experiment" # 本次实验的名称
+        name="virtual_token_experiment_{}".format(finetune_args.motif_name) # 本次实验的名称
     )
 
     # breakpoint()
