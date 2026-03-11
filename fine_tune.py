@@ -75,7 +75,7 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
         if save_to_xyz:
             id_from = i * batch_size
             qm9_visualizer.save_xyz_file(
-                join(eval_args.model_path, 'eval/analyzed_molecules/'),
+                join(f"outputs/{eval_args.exp_name}_{eval_args.motif_name}", 'eval/analyzed_molecules/'),
                 one_hot, charges, x, dataset_info, id_from, name='molecule',
                 node_mask=node_mask) # .txt document for visualization in Py3DMol
 
@@ -92,7 +92,7 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
                                                 fuzzy=True)
     
     # visualize valid molecules that contain the motif...
-    viz_dir = join(eval_args.model_path, f'eval/viz_epoch_{epoch}')
+    viz_dir = join(f"outputs/{eval_args.exp_name}_{eval_args.motif_name}", f'eval/viz_epoch_{epoch}')
     os.makedirs(viz_dir, exist_ok=True)
     print(f"Visualizing samples to {viz_dir}...")
     
@@ -132,6 +132,8 @@ def main():
     parser.add_argument('--dataset_path', type=str, default="dataset/",
                         help='Path to the dataset for fine-tuning')
     parser.add_argument('--prior_dataset', type=str, default="geom_drugs_class_prior_2000",)
+    parser.add_argument('--exp_name', type=str, default="virtual_token_experiment", 
+                        help='Experiment name for logging and saving')
     parser.add_argument('--motif_name', type=str, default="BPN", 
                         help='Name of the motif to check for (e.g., BPN or 2-MBA)')
     parser.add_argument('--virtual_token_dim', type=int, default=256,
@@ -168,6 +170,7 @@ def main():
     args.device = device
     dtype = torch.float32
     args.trainable_ae = False # 只微调 EGNN 相关的参数，保持 VAE 冻结
+    args.exp_name = f"{finetune_args.exp_name}_{finetune_args.motif_name}"
     utils.create_folders(args)
     print(args)
 
@@ -294,9 +297,9 @@ def main():
     # wandb
     wandb.init(
         mode=finetune_args.wandb_mode,
-        project="OptMolGen-Finetune",  # 你的项目名称
-        config=finetune_args,          # 记录你的超参数
-        name="virtual_token_experiment_{}".format(finetune_args.motif_name) # 本次实验的名称
+        project="OptMolGen-Finetune",
+        config=finetune_args,          
+        name=f"{finetune_args.exp_name}_{finetune_args.motif_name}" 
     )
 
     # breakpoint()
