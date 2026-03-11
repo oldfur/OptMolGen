@@ -27,21 +27,125 @@ from models.equivariant_diffusion.en_diffusion import EnHierarchicalVAE
 from tqdm import tqdm
 import copy
 from models.equivariant_diffusion import utils as diffusion_utils
-from train_test import train_epoch_virtual_token
+from train_test import train_epoch_finetune
 import wandb
+from qm9.sampling import sample
+from qm9.analyze import analyze_stability_for_molecules
+from qm9 import visualizer as qm9_visualizer
+from eval_has_motif import batch_check_contains_motif
+from build_geom_dataset import GeomDrugsDataset, GeomDrugsDataLoader, GeomDrugsTransform
+from build_class_prior_dataset import build_data_list_from_pkl
+from visualize_utils import save_rdkit_png, save_collapsed_plot, save_molecule_images
+
+
+def analyze_and_save_finetune(args, eval_args, device, generative_model,
+                     nodes_dist, prop_dist, dataset_info, n_samples=10,
+                     batch_size=10, save_to_xyz=False, epoch=None,
+                     virtual_token=None, motif_smarts=None, atom_mapping=None):
+    batch_size = min(batch_size, n_samples)
+    assert n_samples % batch_size == 0
+    molecules = {'one_hot': [], 'x': [], 'node_mask': []}
+    start_time = time.time()
+
+    # acquire base seed from args, default to 2026 if not specified
+    base_seed = getattr(args, 'seed', 2026)
+    for i in range(int(n_samples/batch_size)):
+        # set random seed dynamically for each batch in torch
+        current_seed = base_seed + i
+        torch.manual_seed(current_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(current_seed)
+        
+        # start sample...
+        nodesxsample = nodes_dist.sample(batch_size)
+        one_hot, charges, x, node_mask = sample(
+            args, device, generative_model, dataset_info, 
+            prop_dist=prop_dist, nodesxsample=nodesxsample, virtual_token=virtual_token)
+
+        molecules['one_hot'].append(one_hot.detach().cpu())
+        molecules['x'].append(x.detach().cpu())
+        molecules['node_mask'].append(node_mask.detach().cpu())
+
+        current_num_samples = (i+1) * batch_size
+        secs_per_sample = (time.time() - start_time) / current_num_samples
+        print('\t %d/%d Molecules generated at %.2f secs/sample' % (
+            current_num_samples, n_samples, secs_per_sample))
+
+        if save_to_xyz:
+            id_from = i * batch_size
+            qm9_visualizer.save_xyz_file(
+                join(eval_args.model_path, 'eval/analyzed_molecules/'),
+                one_hot, charges, x, dataset_info, id_from, name='molecule',
+                node_mask=node_mask) # .txt document for visualization in Py3DMol
+
+    molecules = {key: torch.cat(molecules[key], dim=0) for key in molecules}
+    stability_dict, rdkit_metrics = analyze_stability_for_molecules(
+        molecules, dataset_info)
+    
+    # check motif presence...
+    contains_dict = batch_check_contains_motif( x=molecules['x'], 
+                                                one_hot=molecules['one_hot'],
+                                                node_mask=molecules['node_mask'],
+                                                atom_mapping=atom_mapping,
+                                                motif_smarts=motif_smarts,
+                                                fuzzy=True)
+    
+    # visualize valid molecules that contain the motif...
+    viz_dir = join(eval_args.model_path, f'eval/viz_epoch_{epoch}')
+    os.makedirs(viz_dir, exist_ok=True)
+    print(f"Visualizing samples to {viz_dir}...")
+    
+    # visualize hits (those that contain the motif)
+    if len(contains_dict['matched_mols']) > 0:
+        print(f"Found {len(contains_dict['matched_mols'])} molecules matching the motif!")
+        save_molecule_images(contains_dict['matched_mols'], viz_dir, prefix="hit")
+
+    # visualize failed samples
+    for mol_obj, batch_idx in contains_dict['failed_mols']:
+        file_id = f"fail_{batch_idx}"
+        
+        if mol_obj is not None:
+            # case A: transform succeeded but didn't match the motif 
+            # 可能是结构太乱或官能团学歪了
+            save_rdkit_png(mol_obj, join(viz_dir, f"{file_id}_mismatch.png"), label="No Motif Match")
+        else:
+            # case B: RDKit failed to determine bond orders 
+            # 通常是原子距离太近导致 NaN 或价键爆炸
+            # point cloud plotting tool
+            save_collapsed_plot(
+                molecules['x'][batch_idx], 
+                molecules['one_hot'][batch_idx], 
+                molecules['node_mask'][batch_idx], 
+                atom_mapping, 
+                join(viz_dir, f"{file_id}_collapsed.png")
+            )
+
+    return stability_dict, rdkit_metrics, contains_dict
+
 
 def main():
     # args
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default="outputs/drugs_latent2",
                         help='Specify model path')
-    parser.add_argument('--dataset_path', type=str, default="dataset/BPN_structures",
+    parser.add_argument('--dataset_path', type=str, default="dataset/",
                         help='Path to the dataset for fine-tuning')
+    parser.add_argument('--prior_dataset', type=str, default="geom_drugs_class_prior_2000",)
+    parser.add_argument('--motif_name', type=str, default="BPN", 
+                        help='Name of the motif to check for (e.g., BPN or 2-MBA)')
     parser.add_argument('--virtual_token_dim', type=int, default=256,
                         help='Dimension of the virtual token to be injected into EGNN')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for fine-tuning')
+    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate for fine-tuning')
     parser.add_argument('--ema_decay', type=float, default=0.999,           # TODO
                         help='Amount of EMA decay, 0 means off. A reasonable value is 0.999.')
+    parser.add_argument('--finetune_batch_size', type=int, default=4, help='Batch size for fine-tuning')
+    parser.add_argument('--sample_batch_size', type=int, default=4, help='Batch size for sampling during evaluation')
+    parser.add_argument('--n_samples', type=int, default=12, help='Number of samples to generate for evaluation')
+    parser.add_argument('--save_samples', type=bool, default=False, 
+                        help='Whether to save sampled molecules as XYZ files for visualization')
+    parser.add_argument('--save_epoch', type=int, default=20, help='Save checkpoint every N epochs')
+    parser.add_argument('--report_epoch', type=int, default=5, help='Report evaluation results every N epochs')
+    parser.add_argument('--n_epochs', type=int, default=200, help='Number of fine-tuning epochs')
 
     finetune_args, unparsed_args = parser.parse_known_args()
 
@@ -72,12 +176,38 @@ def main():
         dataloaders, charge_scale = dataset.retrieve_dataloaders(args)
 
     dataset_info = get_dataset_info(args.dataset, args.remove_h)
+    atom_mapping = {nb: i for i, nb in enumerate(dataset_info['atomic_nb'])}
 
     # Create dataloader for fine-tuning
-    finetune_dataset = FineTuneDataset(folder_path=finetune_args.dataset_path, n_dims=3)
+    if finetune_args.motif_name == '2-MBA':
+        motif_smarts = 'Cc1ccccc1C=O'
+    elif finetune_args.motif_name == 'BPN':
+        motif_smarts = 'N#CCC(=O)c1ccccc1'
+    finetune_dataset_path = os.path.join(finetune_args.dataset_path, f'{finetune_args.motif_name}_structures')
+    finetune_dataset = FineTuneDataset(folder_path=finetune_dataset_path, n_dims=3)
     finetune_dataloader = DataLoader(
-        finetune_dataset, batch_size=args.batch_size // 8, shuffle=True,
+        finetune_dataset, batch_size=finetune_args.finetune_batch_size, shuffle=True,
         collate_fn=collate_for_geoldm, num_workers=0
+    )
+    print(f"Fine-tuning dataset loaded from {finetune_dataset_path} with {len(finetune_dataset)} samples.")
+
+    # Create dataloader for class prior 
+    # (optional, can be used for monitoring distribution shift during fine-tuning)
+    class_prior_dataset_path = f"dataset/geom/{finetune_args.prior_dataset}"
+    class_prior_data_list = build_data_list_from_pkl(class_prior_dataset_path)
+    transform = GeomDrugsTransform(
+        dataset_info=dataset_info,
+        include_charges=False,   # 没有电荷数据
+        device=device, 
+        sequential=False         # no CustomBatchSampler
+    )
+    class_prior_dataset = GeomDrugsDataset(class_prior_data_list, transform=transform)
+    class_prior_dataloader = GeomDrugsDataLoader(
+        sequential=False,
+        dataset=class_prior_dataset,
+        batch_size=finetune_args.finetune_batch_size,
+        shuffle=True,
+        drop_last=False
     )
 
     # Load model
@@ -159,37 +289,82 @@ def main():
 
     # breakpoint()
 
+    best_instance_nll = float('inf')
+
     # fine-tuning loop
-    for epoch in range(args.n_epochs):
-    # 调用你定义的训练函数
-        train_epoch_virtual_token(
-            args=args,                    # 原始配置参数
-            loader=finetune_dataloader,   # 你的 FineTuneDataset 加载器
-            epoch=epoch,                  # 当前轮次
-            model=generative_model,       # 原始模型对象 (用于 grad clipping 等)
-            model_dp=generative_model,    # 实际运行的模型 (如果你没用 DataParallel，就传同一个)
-            model_ema=model_ema,          # EMA 模型对象
-            ema=ema,                      # EMA 更新器
-            device=device,                # 显卡设备
-            dtype=dtype,                  # torch.float32
-            property_norms=property_norms,# 属性归一化系数
-            optim=optimizer,              # 仅包含 Token 和 Proj 的优化器
-            nodes_dist=nodes_dist,        # 节点数分布 (来自预训练模型)
-            gradnorm_queue=gradnorm_queue,# 梯度裁剪队列
-            dataset_info=dataset_info,    # 数据集元数据 (原子序数映射等)
-            prop_dist=prop_dist,          # 属性分布
-            virtual_token=virtual_token   # 你声明的可学习变量
+    for epoch in range(finetune_args.n_epochs):
+        total_loss, nll_instance, nll_prior = train_epoch_finetune(
+            args=args,                                 # 原始配置参数
+            loader=finetune_dataloader,                # FineTuneDataset 加载器
+            class_prior_loader=class_prior_dataloader, # 用于监控分布的 class prior 加载器
+            epoch=epoch,                               # 当前轮次
+            model=generative_model,                    # 原始模型对象 (用于 grad clipping 等)
+            model_dp=generative_model,                 # 实际运行的模型 (没 DataParallel 就传同一个)
+            model_ema=model_ema,                       # EMA 模型对象
+            ema=ema,                                   # EMA 更新器
+            device=device,                             # 显卡设备
+            dtype=dtype,                               # torch.float32
+            property_norms=property_norms,             # 属性归一化系数
+            optim=optimizer,                           # 仅包含 Token 和 Proj 的优化器
+            nodes_dist=nodes_dist,                     # 节点数分布 (来自预训练模型)
+            gradnorm_queue=gradnorm_queue,             # 梯度裁剪队列
+            dataset_info=dataset_info,                 # 数据集元数据 (原子序数映射等)
+            prop_dist=prop_dist,                       # 属性分布
+            virtual_token=virtual_token,               # 声明的可学习 token
         )
+
+        if epoch % finetune_args.report_epoch == 0:
+            print("Epoch %d - Total Loss: %.4f, NLL Instance: %.4f, NLL Prior: %.4f" \
+                  % (epoch, total_loss, nll_instance, nll_prior))
     
-        # save checkpoint every 10 epochs
-        if epoch % 10 == 0 and epoch > 0: 
-            save_path = join(finetune_args.model_path, f'virtual_token_epoch_{epoch}.pt')
+        # save checkpoint
+        if epoch % finetune_args.save_epoch == 0 and epoch > 0 and \
+            nll_instance < best_instance_nll:
+            best_instance_nll = nll_instance 
+            best_save_path = join(finetune_args.model_path, f'{finetune_args.motif_name}_virtual_token_epoch_{epoch}.pt')
+            
             torch.save({
-                'virtual_token': virtual_token.data,
-                'token_proj': generative_model.dynamics.egnn.token_proj.state_dict(),
-                'film': generative_model.dynamics.egnn.film.state_dict()
-            }, save_path)
-            print(f"Saved {finetune_args.model_path} adapter to {save_path}")
+            'epoch': epoch,
+            'instance_nll': best_instance_nll,
+            'prior_nll': nll_prior,
+            'virtual_token': virtual_token.data,
+            'token_proj': generative_model.dynamics.egnn.token_proj.state_dict(),
+            'film': generative_model.dynamics.egnn.film.state_dict()
+            }, best_save_path)
+            print(f"*** New Best Instance NLL: {best_instance_nll:.4f}! Saved to {best_save_path} ***")
+            # 记录到 wandb 以便在图表中查看最优值
+            wandb.log({"Best/Instance NLL": best_instance_nll}, commit=False)
+
+        # # 原有的定期保存逻辑可以保留作为备份
+        # if epoch % finetune_args.save_epoch == 0 and epoch > 0:
+        #     save_path = join(finetune_args.model_path, f'{finetune_args.motif_name}_virtual_token_epoch_{epoch}.pt')
+        #     torch.save({
+        #         'virtual_token': virtual_token.data,
+        #         'token_proj': generative_model.dynamics.egnn.token_proj.state_dict(),
+        #         'film': generative_model.dynamics.egnn.film.state_dict()
+        #     }, save_path)
+        #     print(f"Periodic save: {save_path}")
+
+        # sample and check motif presence in samples
+        if epoch % (finetune_args.save_epoch * 2) == 0 and epoch > 0:
+            # sample...
+            stability_dict, rdkit_metrics, contains_dict = analyze_and_save_finetune(
+                args, finetune_args, device, model_ema,
+                nodes_dist, prop_dist, dataset_info,
+                n_samples=finetune_args.n_samples,
+                batch_size=finetune_args.sample_batch_size,
+                save_to_xyz=finetune_args.save_samples,
+                epoch=epoch,
+                virtual_token=virtual_token,
+                motif_smarts=motif_smarts,
+                atom_mapping=atom_mapping
+            )
+            print(f"Epoch {epoch} evaluation results:")
+            print("Stability:", stability_dict)
+            print("RDKit Metrics:", rdkit_metrics)
+            print("Motif Presence rate:", contains_dict['hit_rate'])
+            print(f"Motif Presence count: {contains_dict['hit_count']} / {finetune_args.n_samples}")
+
 
 if __name__ == "__main__":
     main()

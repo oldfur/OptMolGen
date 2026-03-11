@@ -10,6 +10,7 @@ import qm9.utils as qm9utils
 from qm9 import losses
 import time
 import torch
+from itertools import cycle
 
 
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
@@ -207,14 +208,24 @@ def save_and_sample_conditional(args, device, model, prop_dist, dataset_info, ep
     return one_hot, charges, x
 
 
-def train_epoch_virtual_token(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
-                nodes_dist, gradnorm_queue, dataset_info, prop_dist, virtual_token):
+def train_epoch_finetune(args, loader, class_prior_loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
+                nodes_dist, gradnorm_queue, dataset_info, prop_dist, virtual_token, lambda_ppl=1.0):
     model_dp.train()
     model.train()
-    nll_epoch = []
+
+    # acquire iteration info
     n_iterations = len(loader)
+    prior_loader_cycle = cycle(class_prior_loader)
+
+    # init metrics lists for this epoch
+    nll_instance_epoch = []
+    nll_prior_epoch = []
+    total_loss_epoch = []
 
     for i, data in enumerate(loader):
+        optim.zero_grad()
+
+        # ===== 1. Instance Data with virtual_token =====
         x = data['x'].to(device, dtype)
         batch_size, max_nodes = x.size(0), x.size(1)
         node_mask = data['node_mask'].to(device, dtype)
@@ -236,7 +247,7 @@ def train_epoch_virtual_token(args, loader, epoch, model, model_dp, model_ema, e
 
         h = {'categorical': one_hot, 'integer': charges}
 
-        # 处理原始的属性条件 (如 QM9 的 alpha, gap 等)
+        # prop conditioning: ex. alpha, gap in QM9
         if len(args.conditioning) > 0:
             context = qm9utils.prepare_context(args.conditioning, data, property_norms).to(device, dtype)
             assert_correctly_masked(context, node_mask)
@@ -245,17 +256,38 @@ def train_epoch_virtual_token(args, loader, epoch, model, model_dp, model_ema, e
 
         optim.zero_grad()
 
-        # --- 核心修改：通过 kwargs 透传 visual_token ---
-        # EnLatentDiffusion.phi -> Dynamics._forward -> EGNN.forward
-        nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(
+        # compute instance loss with virtual_token
+        nll_instance, reg_instance, mean_abs_z = losses.compute_loss_and_nll(
             args, model_dp, nodes_dist, x, h, node_mask, edge_mask, context,
-            virtual_token=virtual_token # 注入新增关键字参数
+            virtual_token=virtual_token
         )
-        # ----------------------------------------------
 
-        loss = nll + args.ode_regularization * reg_term
+        # ===== 2. Class Prior Data without virtual_token =====
+        prior_data = next(prior_loader_cycle)
+        # prior data formats: positions, one_hot, atom_mask, edge_mask, charges
+        px = prior_data['positions'].to(device, dtype)
+        p_node_mask = prior_data['atom_mask'].to(device, dtype).unsqueeze(2)
+        p_edge_mask = prior_data['edge_mask'].to(device, dtype)
+        p_one_hot = prior_data['one_hot'].to(device, dtype)
+        p_charges = (prior_data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
+        px = remove_mean_with_mask(px, p_node_mask)
+        ph = {'categorical': p_one_hot, 'integer': p_charges}
+
+        # compute prior loss (virtual_token=None)
+        # 确保模型在没有 Token 引导时，依然维持原始的生成质量
+        nll_prior, reg_prior, _ = losses.compute_loss_and_nll(
+            args, model_dp, nodes_dist, px, ph, p_node_mask, p_edge_mask, context,
+            virtual_token=None 
+        )
+
+        # ===== 3. compute total loss and backpropagate =====
+        # total loss = instance loss in fine-tuning + λ * prior loss
+        # loss = nll + args.ode_regularization * reg_term
+        loss = (nll_instance + args.ode_regularization * reg_instance) + \
+               lambda_ppl * (nll_prior + args.ode_regularization * reg_prior)
         loss.backward()
 
+        # grad clip and params update
         if args.clip_grad:
             grad_norm = utils.gradient_clipping(model, gradnorm_queue)
         else:
@@ -266,18 +298,39 @@ def train_epoch_virtual_token(args, loader, epoch, model, model_dp, model_ema, e
         if args.ema_decay > 0:
             ema.update_model_average(model_ema, model)
 
-        if i % args.n_report_steps == 0 or i == n_iterations - 1:
-            print(f"\rEpoch: {epoch}, iter: {i+1}/{n_iterations}, "
-                  f"Loss {loss.item():.2f}, NLL: {nll.item():.2f}, "
-                  f"RegTerm: {reg_term.item():.1f}, "
-                  f"GradNorm: {grad_norm:.1f}")
-        
-        nll_epoch.append(nll.item())
-        wandb.log({"Batch NLL": nll.item()}, commit=True)
-        
+        # 收集每个 batch 的数据
+        nll_instance_epoch.append(nll_instance.item())
+        nll_prior_epoch.append(nll_prior.item())
+        total_loss_epoch.append(loss.item())
+
+        # Batch 级记录 (optional)
+        wandb.log({
+            "Batch/Total Loss": loss.item(),
+            "Batch/Instance NLL": nll_instance.item(),
+            "Batch/Prior NLL": nll_prior.item()
+        })
+
+        # 打印 batch 内训练信息 (optional)
+        # if i % args.n_report_steps == 0 or i == n_iterations - 1:
+        #     print(f"\rEpoch: {epoch}, iter: {i+1}/{n_iterations}, "
+        #           f"Total Loss {loss.item():.2f}, Instance NLL: {nll_instance.item():.2f}, "
+        #           f"Prior NLL: {nll_prior.item():.2f}, GradNorm: {grad_norm:.1f}")
+                
         if args.break_train_epoch:
             break
             
-        wandb.log({"Train Epoch NLL": np.mean(nll_epoch)}, commit=False)
+    # Epoch 级记录汇总
+    avg_nll_instance = np.mean(nll_instance_epoch)
+    avg_nll_prior = np.mean(nll_prior_epoch)
+    avg_total_loss = np.mean(total_loss_epoch)
+
+    wandb.log({
+        "Epoch/Average Total Loss": avg_total_loss,
+        "Epoch/Average Instance NLL": avg_nll_instance,
+        "Epoch/Average Prior NLL": avg_nll_prior,
+        "Epoch": epoch
+    })
+
+    return avg_total_loss, avg_nll_instance, avg_nll_prior
 
   

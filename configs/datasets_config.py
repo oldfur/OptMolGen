@@ -140,7 +140,7 @@ def get_dataset_info(dataset_name, remove_h):
             return qm9_with_h
         else:
             return qm9_without_h
-    elif dataset_name == 'geom':
+    elif dataset_name == 'geom' or 'geom_drugs' in dataset_name:
         if not remove_h:
             return geom_with_h
         else:

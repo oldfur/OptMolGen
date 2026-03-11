@@ -11,7 +11,12 @@ class TokenConditioning(nn.Module):
 
     def forward(self, h, token):
         gamma = self.gamma(token)
+        # 约束 1：将 gamma 的范围调整为 [0.5, 1.5]，避免过度抑制特征
+        gamma = torch.sigmoid(gamma) + 0.5  
         beta  = self.beta(token)
+        # 约束 2：限制偏移范围在 [-2, 2]
+        beta = torch.tanh(beta) * 2.0 
+
         return gamma * h + beta
 
 
@@ -199,7 +204,11 @@ class EGNN(nn.Module):
         # token embedding learning layer
         if self.virtual_token_dim is not None:
             self.token_proj = nn.Linear(self.virtual_token_dim, self.hidden_nf)
-        self.film = TokenConditioning(self.virtual_token_dim, self.hidden_nf) if self.virtual_token_dim is not None else None
+            self.film = TokenConditioning(self.hidden_nf, self.hidden_nf)
+            # --- 思路阐述 --
+            # 把 virtual_token 映射到 hidden_nf 空间后，再进行 FiLM 调制，实际上是将“条件信号”与“特征信号”放在
+            # 了同一个流形空间中。这不仅解决了数值不稳定的问题，通常还能显著提升分子的生成质量，因为 FiLM 层现在的输
+            # 入经过了预训练权重的对齐。
         
         self.to(self.device)
 
@@ -213,9 +222,9 @@ class EGNN(nn.Module):
         # token_proj
         if hasattr(self, 'token_proj') and virtual_token is not None:
             token_effect = self.token_proj(virtual_token)
-            # 通过残差融合，不改变特征维度，最大化保留预训练知识
-            # h = h + token_effect
-            h = self.film(h, virtual_token)  # 使用 FiLM 层进行调制，增强表达能力
+            # h = h + token_effect  # 残差融合，不改变特征维度，最大化保留预训练知识
+            h = self.film(h, token_effect)  # 使用 FiLM 层进行调制，增强表达能力       
+
         if node_mask is not None:
             h = h * node_mask  # 防止特征污染
 
