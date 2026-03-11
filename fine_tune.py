@@ -293,7 +293,7 @@ def main():
 
     # wandb
     wandb.init(
-        mode=args.wandb_mode,
+        mode=finetune_args.wandb_mode,
         project="OptMolGen-Finetune",  # 你的项目名称
         config=finetune_args,          # 记录你的超参数
         name="virtual_token_experiment_{}".format(finetune_args.motif_name) # 本次实验的名称
