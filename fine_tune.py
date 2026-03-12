@@ -39,6 +39,34 @@ from visualize_utils import save_rdkit_svg, save_collapsed_plot, save_molecule_i
 from models.egnn.lora import inject_lora_to_egnn
 
 
+def verify_trainable_status(model):
+    """验证可训练 layer 状态"""
+    print("\n=== 可训练 layer 验证 ===")
+    trainable_params = []
+    frozen_params = []
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            trainable_params.append(name)
+        else:
+            frozen_params.append(name)
+    
+    print("\n可训练 layer:")
+    for name in sorted(trainable_params):
+        print(f"  ✓ {name}")
+    
+    print(f"\n总数: {len(trainable_params)} 个可训练 layer")
+    
+    # 特别检查 original_linear 是否被错误解冻
+    problem_params = [name for name in trainable_params if 'original_linear' in name]
+    if problem_params:
+        print("\n⚠️ 警告: 发现被错误解冻的 original_linear 参数:")
+        for name in problem_params:
+            print(f"  ✗ {name}")
+    else:
+        print("\n✅ 检查通过: 所有 original_linear 参数都已冻结")
+
+
 def analyze_and_save_finetune(args, eval_args, device, generative_model,
                      nodes_dist, prop_dist, dataset_info, n_samples=10,
                      batch_size=10, save_to_xyz=False, epoch=None,
@@ -230,20 +258,19 @@ def main():
         property_norms = compute_mean_mad(dataloaders, args.conditioning, args.dataset)
         prop_dist.set_normalizer(property_norms)
     
-    # LoRA
-    generative_model.dynamics.egnn = inject_lora_to_egnn(generative_model.dynamics.egnn)
-    
     generative_model.to(device)
     fn = 'generative_model_ema.npy' if args.ema_decay > 0 else 'generative_model.npy'
     flow_state_dict = torch.load(join(finetune_args.model_path, fn), map_location=device)
-    # generative_model.load_state_dict(flow_state_dict)
     model_dict = generative_model.state_dict()
     pretrained_dict = {k: v for k, v in flow_state_dict.items() if k in model_dict} # 过滤权重中不存在的键
     model_dict.update(pretrained_dict) # 更新现有的 model_dict
     generative_model.load_state_dict(model_dict) # load model state dict
-    # print newly added keys
     missing_keys = [k for k in model_dict.keys() if k not in flow_state_dict]
-    print(f"以下层是新定义的，将保持随机初始化: {missing_keys}")
+    print(f"load model successful!")
+
+    # LoRA to egnn
+    generative_model.dynamics.egnn = inject_lora_to_egnn(generative_model.dynamics.egnn)
+    print("LoRA layers injected into EGNN!")
 
     # Extract parameters and frozen
     generative_model.eval()
@@ -257,8 +284,11 @@ def main():
     
     # 局部解冻
     for name, param in generative_model.named_parameters():
-        if 'lora_' in name or 'token_proj' in name or 'film' in name:
+        if 'lora_A' in name or 'lora_B' in name or 'token_proj' in name or 'film' in name:
             param.requires_grad = True
+
+    # 验证可训练参数状态，确保 original_linear 已冻结，LoRA 参数和 token_proj/film 已解冻
+    verify_trainable_status(generative_model)
     
     # 提取 LoRA 参数
     lora_params = [p for n, p in generative_model.named_parameters() if 'lora_' in n]

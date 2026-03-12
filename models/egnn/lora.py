@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 class LoRALinear(nn.Module):
-    def __init__(self, original_linear, rank=4, alpha=1):
+    def __init__(self, original_linear, rank=4, alpha=0.001):
         super().__init__()
         self.original_linear = original_linear
         self.rank = rank
@@ -14,8 +14,9 @@ class LoRALinear(nn.Module):
         
         # LoRA 权重：低秩分解 A 和 B
         # A 使用小高斯分布初始化，B 初始化为全 0
-        self.lora_A = nn.Parameter(torch.randn(in_features, rank) * 0.01)
-        self.lora_B = nn.Parameter(torch.zeros(rank, out_features))
+        dev = self.original_linear.weight.device
+        self.lora_A = nn.Parameter(torch.randn(in_features, rank, device=dev) * 0.01)
+        self.lora_B = nn.Parameter(torch.zeros(rank, out_features, device=dev))
         
         # 冻结原始权重，确保训练时只更新 LoRA 参数
         self.original_linear.weight.requires_grad = False
@@ -25,7 +26,9 @@ class LoRALinear(nn.Module):
     def forward(self, x):
         # 原始冻结输出 + (x @ A @ B) * scaling
         original_out = self.original_linear(x)
-        lora_out = (x @ self.lora_A @ self.lora_B) * self.scaling
+        a = self.lora_A.to(x.device)
+        b = self.lora_B.to(x.device)
+        lora_out = (x @ a @ b) * self.scaling
         return original_out + lora_out
 
 def inject_lora_to_last_layers(model, rank=4, alpha=4):

@@ -213,9 +213,7 @@ class EGNN(nn.Module):
         # token embedding learning layer
         if self.virtual_token_dim is not None:
             self.token_proj = nn.Linear(self.virtual_token_dim, self.hidden_nf)
-            nn.init.zeros_(self.token_proj.weight)
-            nn.init.zeros_(self.token_proj.bias)
-            # self.film = TokenConditioning(self.hidden_nf, self.hidden_nf)
+            self.film = TokenConditioning(self.hidden_nf, self.hidden_nf)
 
             # --- 思路阐述 --
             # 把 virtual_token 映射到 hidden_nf 空间后，再进行 FiLM 调制，实际上是将“条件信号”与“特征信号”放在
@@ -235,8 +233,7 @@ class EGNN(nn.Module):
         if hasattr(self, 'token_proj') and virtual_token is not None:
             # norm_token = torch.nn.functional.normalize(virtual_token, p=2, dim=-1)
             token_effect = self.token_proj(virtual_token)
-            h = h + token_effect  # 残差融合，不改变特征维度，最大化保留预训练知识
-            # h = h + self.film(h, token_effect)  # 使用 FiLM 层进行调制，增强表达能力       
+            h = self.film(h, token_effect)  # 使用 FiLM 进行调制增强表达能力       
 
         if node_mask is not None:
             h = h * node_mask  # 防止特征污染
