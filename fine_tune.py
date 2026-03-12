@@ -138,7 +138,7 @@ def main():
                         help='Name of the motif to check for (e.g., BPN or 2-MBA)')
     parser.add_argument('--virtual_token_dim', type=int, default=256,
                         help='Dimension of the virtual token to be injected into EGNN')
-    parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate for fine-tuning')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate for fine-tuning')
     parser.add_argument('--ema_decay', type=float, default=0.999,           # TODO
                         help='Amount of EMA decay, 0 means off. A reasonable value is 0.999.')
     parser.add_argument('--finetune_batch_size', type=int, default=4, help='Batch size for fine-tuning')
@@ -146,8 +146,8 @@ def main():
     parser.add_argument('--n_samples', type=int, default=8, help='Number of samples to generate for evaluation')
     parser.add_argument('--save_samples', type=bool, default=False, 
                         help='Whether to save sampled molecules as XYZ files for visualization')
-    parser.add_argument('--save_epoch', type=int, default=10, help='Save checkpoint every N epochs')
-    parser.add_argument('--report_epoch', type=int, default=2, help='Report evaluation results every N epochs')
+    parser.add_argument('--save_epoch', type=int, default=5, help='Save checkpoint every N epochs')
+    parser.add_argument('--report_epoch', type=int, default=1, help='Report evaluation results every N epochs')
     parser.add_argument('--n_epochs', type=int, default=400, help='Number of fine-tuning epochs')
     parser.add_argument('--wandb-mode', type=str, default='online',
                        choices=['online', 'offline', 'disabled', 'dryrun'],
@@ -266,7 +266,7 @@ def main():
     # 构建分层学习率表
     trainable_params = [
         # Token 本身：需要最大的步长来在隐空间寻找 BPN 的位置
-        {'params': [virtual_token], 'lr': finetune_args.lr},  
+        {'params': [virtual_token], 'lr': finetune_args.lr, 'weight_decay': 1e-3},  
         
         # 投影层与 FiLM 层：负责翻译 Token 信号，建议保持在 1e-4
         {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1},
@@ -367,7 +367,7 @@ def main():
         #     print(f"Periodic save: {save_path}")
 
         # sample and check motif presence in samples
-        if epoch % (finetune_args.save_epoch * 2) == 0 and epoch > 0:
+        if epoch % (finetune_args.save_epoch * 2) == 0 :
             # sample...
             stability_dict, rdkit_metrics, contains_dict = analyze_and_save_finetune(
                 args, finetune_args, device, model_ema,
