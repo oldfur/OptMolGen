@@ -9,6 +9,15 @@ class TokenConditioning(nn.Module):
         self.gamma = nn.Linear(token_dim, hidden_dim)
         self.beta  = nn.Linear(token_dim, hidden_dim)
 
+        # zero initialization to ensure stable fine-tuning
+        nn.init.zeros_(self.gamma.weight)
+        if self.gamma.bias is not None:
+            nn.init.zeros_(self.gamma.bias)
+            
+        nn.init.zeros_(self.beta.weight)
+        if self.beta.bias is not None:
+            nn.init.zeros_(self.beta.bias)
+
     def forward(self, h, token):
         gamma = self.gamma(token)
         # 约束 1：将 gamma 的范围调整为 [0.5, 1.5]，避免过度抑制特征
