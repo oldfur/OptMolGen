@@ -313,6 +313,28 @@ def main():
 
     # fine-tuning loop
     for epoch in range(finetune_args.n_epochs):
+
+        # sample and check motif presence in samples
+        if epoch % (finetune_args.save_epoch * 2) == 0 :
+            # sample...
+            stability_dict, rdkit_metrics, contains_dict = analyze_and_save_finetune(
+                args, finetune_args, device, model_ema,
+                nodes_dist, prop_dist, dataset_info,
+                n_samples=finetune_args.n_samples,
+                batch_size=finetune_args.sample_batch_size,
+                save_to_xyz=finetune_args.save_samples,
+                epoch=epoch,
+                virtual_token=virtual_token,
+                motif_smarts=motif_smarts,
+                atom_mapping=atom_mapping
+            )
+            print(f"Epoch {epoch} evaluation results:")
+            print("Stability:", stability_dict)
+            print("RDKit Metrics:", rdkit_metrics)
+            print("Motif Presence rate:", contains_dict['hit_rate'])
+            print(f"Motif Presence count: {contains_dict['hit_count']} / {finetune_args.n_samples}")
+
+        # train
         total_loss, nll_instance, nll_prior = train_epoch_finetune(
             args=args,                                 # 原始配置参数
             loader=finetune_dataloader,                # FineTuneDataset 加载器
@@ -365,26 +387,6 @@ def main():
         #         'film': generative_model.dynamics.egnn.film.state_dict()
         #     }, save_path)
         #     print(f"Periodic save: {save_path}")
-
-        # sample and check motif presence in samples
-        if epoch % (finetune_args.save_epoch * 2) == 0 :
-            # sample...
-            stability_dict, rdkit_metrics, contains_dict = analyze_and_save_finetune(
-                args, finetune_args, device, model_ema,
-                nodes_dist, prop_dist, dataset_info,
-                n_samples=finetune_args.n_samples,
-                batch_size=finetune_args.sample_batch_size,
-                save_to_xyz=finetune_args.save_samples,
-                epoch=epoch,
-                virtual_token=virtual_token,
-                motif_smarts=motif_smarts,
-                atom_mapping=atom_mapping
-            )
-            print(f"Epoch {epoch} evaluation results:")
-            print("Stability:", stability_dict)
-            print("RDKit Metrics:", rdkit_metrics)
-            print("Motif Presence rate:", contains_dict['hit_rate'])
-            print(f"Motif Presence count: {contains_dict['hit_count']} / {finetune_args.n_samples}")
 
 
 if __name__ == "__main__":
