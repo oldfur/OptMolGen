@@ -148,6 +148,13 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
                 atom_mapping, 
                 join(viz_dir, f"{file_id}_collapsed.svg")
             )
+    
+    wandb.log({
+        "Eval/Atom Stability": stability_dict['atm_stable'],
+        "Eval/RDKit Validity": rdkit_metrics[0][0],  # validity
+        "Eval/RDKit Uniqueness": rdkit_metrics[0][1],  # uniqueness
+        "Eval/Motif Presence": contains_dict['hit_rate']
+    }, commit=False)
 
     return stability_dict, rdkit_metrics, contains_dict
 
