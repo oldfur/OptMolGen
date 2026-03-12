@@ -254,8 +254,6 @@ def train_epoch_finetune(args, loader, class_prior_loader, epoch, model, model_d
         else:
             context = None
 
-        optim.zero_grad()
-
         # compute instance loss with virtual_token
         nll_instance, reg_instance, mean_abs_z = losses.compute_loss_and_nll(
             args, model_dp, nodes_dist, x, h, node_mask, edge_mask, context,
@@ -272,6 +270,8 @@ def train_epoch_finetune(args, loader, class_prior_loader, epoch, model, model_d
         p_charges = (prior_data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
         px = remove_mean_with_mask(px, p_node_mask)
         ph = {'categorical': p_one_hot, 'integer': p_charges}
+        check_mask_correct([px, p_one_hot, p_charges], p_node_mask)
+        assert_mean_zero_with_mask(px, p_node_mask)
 
         # compute prior loss (virtual_token=None)
         # 确保模型在没有 Token 引导时，依然维持原始的生成质量
@@ -292,6 +292,9 @@ def train_epoch_finetune(args, loader, class_prior_loader, epoch, model, model_d
             grad_norm = utils.gradient_clipping(model, gradnorm_queue)
         else:
             grad_norm = 0.
+        
+        # 限制梯度的最大范数
+        torch.nn.utils.clip_grad_norm_(model_dp.parameters(), max_norm=1.0)
 
         optim.step()
 
