@@ -122,7 +122,6 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
     # visualize valid molecules that contain the motif...
     viz_dir = join(f"outputs/{eval_args.exp_name}_{eval_args.motif_name}", f'eval/viz_epoch_{epoch}')
     os.makedirs(viz_dir, exist_ok=True)
-    print(f"Visualizing samples to {viz_dir}...")
     
     # visualize hits (those that contain the motif)
     if len(contains_dict['matched_mols']) > 0:
@@ -155,6 +154,11 @@ def analyze_and_save_finetune(args, eval_args, device, generative_model,
         "Eval/RDKit Uniqueness": rdkit_metrics[0][1],  # uniqueness
         "Eval/Motif Presence": contains_dict['hit_rate']
     }, commit=False)
+
+    print("Atom Stability: {:.2f}%".format(100 * stability_dict['atm_stable']))
+    print("Motif Hit Rate: {:.2f}%".format(100 * contains_dict['hit_rate']))
+    print(f"Motif Hit Count: {contains_dict['hit_count']} / {eval_args.n_samples}")
+    print(f"Visualizing samples to {viz_dir}")
 
     return stability_dict, rdkit_metrics, contains_dict
 
@@ -365,11 +369,6 @@ def main():
                 motif_smarts=motif_smarts,
                 atom_mapping=atom_mapping
             )
-            print(f"Epoch {epoch} evaluation results:")
-            print("Stability:", stability_dict)
-            print("RDKit Metrics:", rdkit_metrics)
-            print("Motif Presence rate:", contains_dict['hit_rate'])
-            print(f"Motif Presence count: {contains_dict['hit_count']} / {finetune_args.n_samples}")
 
         # train
         total_loss, nll_instance, nll_prior = train_epoch_finetune(
