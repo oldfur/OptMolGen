@@ -270,7 +270,7 @@ def main():
         
         # 投影层与 FiLM 层：负责翻译 Token 信号，建议保持在 1e-4
         {'params': generative_model.dynamics.egnn.token_proj.parameters(), 'lr': finetune_args.lr * 0.1},
-        {'params': generative_model.dynamics.egnn.film.parameters(), 'lr': finetune_args.lr * 0.1},
+        # {'params': generative_model.dynamics.egnn.film.parameters(), 'lr': finetune_args.lr * 0.1},
         
         # LoRA 参数：直接微调 EGNN 的 node/coord 逻辑
         # 建议初始值设为 1e-4 (finetune_args.lr * 0.1)
