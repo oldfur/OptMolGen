@@ -152,7 +152,10 @@ def main():
     parser.add_argument('--wandb-mode', type=str, default='online',
                        choices=['online', 'offline', 'disabled', 'dryrun'],
                        help='Wandb mode: online/offline/disabled/dryrun')
+    parser.add_argument('--lambda_ppl', type=float, default=0.0, help='Weight for PPL regularization term')
     finetune_args, unparsed_args = parser.parse_known_args()
+    print("Finetuning with the following arguments:")
+    print(finetune_args)
 
     assert finetune_args.model_path is not None
 
@@ -304,7 +307,7 @@ def main():
         name=f"{finetune_args.exp_name}_{finetune_args.motif_name}" 
     )
 
-    breakpoint()
+    # breakpoint()
 
     best_instance_nll = float('inf')
 
@@ -328,6 +331,7 @@ def main():
             dataset_info=dataset_info,                 # 数据集元数据 (原子序数映射等)
             prop_dist=prop_dist,                       # 属性分布
             virtual_token=virtual_token,               # 声明的可学习 token
+            lambda_ppl=finetune_args.lambda_ppl      # PPL 正则化权重
         )
 
         if epoch % finetune_args.report_epoch == 0:
