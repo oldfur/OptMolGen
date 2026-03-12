@@ -54,3 +54,32 @@ def inject_lora_to_last_layers(model, rank=4, alpha=4):
             equiv_update.coord_mlp[0] = LoRALinear(equiv_update.coord_mlp[0], rank=rank, alpha=alpha)
             
     return model
+
+def inject_lora_to_egnn(model, rank=4, alpha=4):
+    """
+    修正后的 EGNN LoRA 注入逻辑：
+    1. 覆盖所有层的 node_mlp（特征更新），以匹配前端 FiLM 的全局调制。
+    2. 完全冻结 coord_mlp（坐标更新），严格保持预训练的物理与几何等变性法则。
+    """
+    n_layers = model.n_layers
+    
+    # 【修改 1】不再只针对最后两层，而是遍历网络中的每一层 EquivariantBlock
+    for i in range(n_layers):
+        block = getattr(model, f"e_block_{i}")
+        
+        # 针对特征更新层 (node_mlp) 注入 LoRA
+        # 让网络在每一层都有能力去适应 virtual_token 造成的特征空间偏移
+        for j in range(block.n_layers): 
+            gcl = getattr(block, f"gcl_{j}")
+            if isinstance(gcl.node_mlp[0], nn.Linear):
+                gcl.node_mlp[0] = LoRALinear(gcl.node_mlp[0], rank=rank, alpha=alpha)
+                
+            # 💡 进阶提示：如果 gcl.node_mlp 包含多个 Linear（比如 [Linear, SiLU, Linear]），
+            # 且显存允许，也可以考虑遍历 node_mlp 并替换所有 nn.Linear。
+            # 但替换第一层（输入层）通常是性价比最高且最稳妥的起点。
+
+        # 【修改 2】删除了 coord_mlp 的 LoRA 注入代码
+        # 核心逻辑：不去干预 equiv_update.coord_mlp。
+        # 让节点特征 (h) 发生改变，但让模型依然使用预训练时学到的“受力规则”去更新坐标 (x)。
+        
+    return model

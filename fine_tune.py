@@ -36,7 +36,7 @@ from eval_has_motif import batch_check_contains_motif
 from build_geom_dataset import GeomDrugsDataset, GeomDrugsDataLoader, GeomDrugsTransform
 from build_class_prior_dataset import build_data_list_from_pkl
 from visualize_utils import save_rdkit_svg, save_collapsed_plot, save_molecule_images
-from models.egnn.lora import inject_lora_to_last_layers
+from models.egnn.lora import inject_lora_to_egnn
 
 
 def analyze_and_save_finetune(args, eval_args, device, generative_model,
@@ -222,13 +222,15 @@ def main():
     else:
         generative_model, nodes_dist, prop_dist = get_latent_diffusion(args, device, dataset_info, 
                                                                        dataloaders['train'], finetune_args=finetune_args)
-    # LoRA
-    generative_model.dynamics.egnn = inject_lora_to_last_layers(generative_model.dynamics.egnn)
+    
     if prop_dist is not None:
         property_norms = compute_mean_mad(dataloaders, args.conditioning, args.dataset)
         prop_dist.set_normalizer(property_norms)
+    
+    # LoRA
+    generative_model.dynamics.egnn = inject_lora_to_egnn(generative_model.dynamics.egnn)
+    
     generative_model.to(device)
-
     fn = 'generative_model_ema.npy' if args.ema_decay > 0 else 'generative_model.npy'
     flow_state_dict = torch.load(join(finetune_args.model_path, fn), map_location=device)
     # generative_model.load_state_dict(flow_state_dict)
@@ -236,7 +238,7 @@ def main():
     pretrained_dict = {k: v for k, v in flow_state_dict.items() if k in model_dict} # 过滤权重中不存在的键
     model_dict.update(pretrained_dict) # 更新现有的 model_dict
     generative_model.load_state_dict(model_dict) # load model state dict
-    # 打印没加载上的层(新加的层)
+    # print newly added keys
     missing_keys = [k for k in model_dict.keys() if k not in flow_state_dict]
     print(f"以下层是新定义的，将保持随机初始化: {missing_keys}")
 
@@ -302,7 +304,7 @@ def main():
         name=f"{finetune_args.exp_name}_{finetune_args.motif_name}" 
     )
 
-    # breakpoint()
+    breakpoint()
 
     best_instance_nll = float('inf')
 
